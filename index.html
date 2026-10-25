@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>QR Scanner</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --accent: #4ff0b0;
+      --ink: #f4f7fb;
+      --muted: #9aa7b8;
+      --sheet: #12171f;
+      --line: #263040;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; margin: 0; overflow: hidden; background: #000; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      color: var(--ink);
+    }
+
+    /* Camera fills the whole screen */
+    #video {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; background: #000;
+    }
+
+    /* Dimmed overlay with a clear square cut-out */
+    .viewfinder {
+      position: fixed; inset: 0; display: grid; place-items: center;
+      pointer-events: none;
+    }
+    .window {
+      width: min(72vw, 300px); aspect-ratio: 1; position: relative;
+      border-radius: 28px;
+      box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .55);
+    }
+    .corner {
+      position: absolute; width: 44px; height: 44px;
+      border: 4px solid var(--accent);
+      transition: border-color .2s;
+    }
+    .corner.tl { top: -2px; left: -2px; border-right: 0; border-bottom: 0; border-top-left-radius: 28px; }
+    .corner.tr { top: -2px; right: -2px; border-left: 0; border-bottom: 0; border-top-right-radius: 28px; }
+    .corner.bl { bottom: -2px; left: -2px; border-right: 0; border-top: 0; border-bottom-left-radius: 28px; }
+    .corner.br { bottom: -2px; right: -2px; border-left: 0; border-top: 0; border-bottom-right-radius: 28px; }
+    .line {
+      position: absolute; left: 12px; right: 12px; top: 12px; height: 2px;
+      background: var(--accent); border-radius: 2px;
+      box-shadow: 0 0 14px 2px rgba(79, 240, 176, .7);
+      animation: sweep 2.2s ease-in-out infinite alternate;
+    }
+    @keyframes sweep { to { transform: translateY(calc(min(72vw, 300px) - 28px)); } }
+    body.found .line { animation: none; opacity: 0; }
+    body.found .corner { border-color: #fff; }
+
+    /* Top hint */
+    .top {
+      position: fixed; left: 0; right: 0;
+      top: calc(env(safe-area-inset-top) + 18px);
+      display: flex; justify-content: center; pointer-events: none;
+    }
+    .pill {
+      padding: 10px 18px; border-radius: 999px;
+      background: rgba(18, 23, 31, .72);
+      -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+      font-size: .92rem; font-weight: 600; letter-spacing: .01em;
+    }
+
+    /* Camera error / permission message */
+    .message {
+      position: fixed; inset: 0; display: none; place-items: center;
+      padding: 32px; text-align: center; background: #0b0f14;
+      color: var(--muted); line-height: 1.5; font-size: 1rem;
+    }
+    .message strong { display: block; color: var(--ink); font-size: 1.15rem; margin-bottom: 8px; }
+    body.error .message { display: grid; }
+
+    /* Result sheet */
+    .sheet {
+      position: fixed; left: 10px; right: 10px;
+      bottom: calc(env(safe-area-inset-bottom) + 10px);
+      background: var(--sheet); border: 1px solid var(--line);
+      border-radius: 26px; padding: 20px 20px 18px;
+      transform: translateY(130%); transition: transform .32s cubic-bezier(.2, .9, .3, 1);
+      box-shadow: 0 -12px 40px rgba(0, 0, 0, .5);
+    }
+    .sheet.show { transform: translateY(0); }
+    .grab { width: 38px; height: 4px; border-radius: 4px; background: #3a4558; margin: -8px auto 14px; }
+    .kind { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; color: var(--accent); font-weight: 700; font-size: .9rem; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+    .title { margin: 0 0 4px; font-size: 1.3rem; font-weight: 700; overflow-wrap: anywhere; }
+    .body {
+      margin: 0; color: #cdd7e4; font-size: .98rem; line-height: 1.45;
+      overflow-wrap: anywhere; white-space: pre-wrap; max-height: 28vh; overflow: auto;
+      -webkit-user-select: text; user-select: text;
+    }
+    .foot { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .85rem; }
+    .foot a { color: var(--accent); font-weight: 700; text-decoration: none; }
+    .bar { height: 3px; background: var(--line); border-radius: 3px; margin-top: 14px; overflow: hidden; display: none; }
+    .bar i { display: block; height: 100%; width: 100%; background: var(--accent); transform-origin: left; }
+    .bar.run { display: block; }
+    .bar.run i { animation: drain var(--ms, 1500ms) linear forwards; }
+    @keyframes drain { to { transform: scaleX(0); } }
+
+    canvas { display: none; }
+    @media (prefers-reduced-motion: reduce) {
+      .line, .bar.run i { animation: none; }
+      .sheet { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay muted playsinline></video>
+
+  <div class="viewfinder">
+    <div class="window">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <span class="line"></span>
+    </div>
+  </div>
+
+  <div class="top"><div class="pill" id="hint">Point at a QR code</div></div>
+
+  <div class="message" id="message" role="alert">
+    <div><strong id="msgTitle">Camera unavailable</strong><span id="msgText"></span></div>
+  </div>
+
+  <section class="sheet" id="sheet" aria-live="polite">
+    <div class="grab"></div>
+    <div class="kind"><span class="dot"></span><span id="kind">Result</span></div>
+    <h2 class="title" id="title"></h2>
+    <p class="body" id="content"></p>
+    <div class="bar" id="bar"><i></i></div>
+    <div class="foot"><span id="note"></span><a id="fallback" href="#" hidden>Open</a></div>
+  </section>
+
+  <canvas id="canvas"></canvas>
+
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script>
+    const $ = id => document.getElementById(id);
+    const video = $("video"), canvas = $("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const sheet = $("sheet");
+
+    let stream = null, rafId = null, scanning = false, busy = false;
+    let timer = null, lastTick = 0, starting = false;
+
+    /* ---------- Camera ---------- */
+    async function startCamera() {
+      if (starting || stream) return;
+      starting = true;
+      document.body.classList.remove("error");
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        showError("Camera API unavailable", "Open this page over HTTPS in Safari.");
+        starting = false; return;
+      }
+      if (typeof jsQR === "undefined") {
+        showError("Scanner library missing", "Check your internet connection and reload.");
+        starting = false; return;
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }
+        });
+        video.srcObject = stream;
+        await video.play();
+        scanning = true;
+        tick();
+      } catch (e) {
+        stream = null;
+        if (e.name === "NotAllowedError" || e.name === "SecurityError") {
+          showError("Camera access is off", "Allow camera for this site in Settings → Safari → Camera, then tap anywhere.");
+        } else {
+          showError("Couldn't start the camera", "Close other apps using the camera, then tap anywhere to retry.");
+        }
+      }
+      starting = false;
+    }
+
+    function stopCamera() {
+      scanning = false;
+      cancelAnimationFrame(rafId);
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      video.srcObject = null;
+    }
+
+    function showError(title, text) {
+      $("msgTitle").textContent = title;
+      $("msgText").textContent = text;
+      document.body.classList.add("error");
+    }
+
+    /* ---------- Scan loop (downscaled + throttled for speed) ---------- */
+    function tick(now = 0) {
+      if (!scanning) return;
+      rafId = requestAnimationFrame(tick);
+      if (busy || now - lastTick < 90 || video.readyState < video.HAVE_ENOUGH_DATA) return;
+      lastTick = now;
+
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return;
+      const scale = Math.min(1, 720 / Math.max(vw, vh));
+      const w = Math.round(vw * scale), h = Math.round(vh * scale);
+      canvas.width = w; canvas.height = h;
+      ctx.drawImage(video, 0, 0, w, h);
+      const img = ctx.getImageData(0, 0, w, h);
+      const code = jsQR(img.data, w, h, { inversionAttempts: "dontInvert" });
+      if (code && code.data) handle(code.data);
+    }
+
+    /* ---------- Result handling ---------- */
+    function parseUpi(value) {
+      const raw = (value || "").trim();
+      try {
+        const url = new URL(raw);
+        if (url.protocol.toLowerCase() === "upi:" && url.hostname.toLowerCase() === "pay") {
+          const params = new URLSearchParams(url.search);
+          const pa = params.get("pa");
+          if (pa && pa.includes("@")) return params;
+        }
+      } catch (_) {}
+      if (/^[A-Z0-9._-]{2,}@[A-Z0-9.-]{2,}$/i.test(raw)) {
+        return new URLSearchParams({ pa: raw, cu: "INR" });
+      }
+      return null;
+    }
+
+    function parseWifi(v) {
+      if (!/^WIFI:/i.test(v)) return null;
+      const get = k => {
+        const m = v.match(new RegExp("(?:^WIFI:|;)" + k + ":((?:\\\\.|[^;])*)", "i"));
+        return m ? m[1].replace(/\\(.)/g, "$1") : "";
+      };
+      return { ssid: get("S"), pass: get("P"), type: get("T") || "Open" };
+    }
+
+    function parseVcard(v) {
+      if (!/^BEGIN:VCARD/i.test(v)) return null;
+      const pick = k => (v.match(new RegExp("^" + k + "[^:\\n]*:(.*)$", "im")) || [])[1] || "";
+      return { name: pick("FN") || pick("N").replace(/;+/g, " ").trim(), tel: pick("TEL"), email: pick("EMAIL") };
+    }
+
+    function handle(value) {
+      busy = true;
+      document.body.classList.add("found");
+      if (navigator.vibrate) navigator.vibrate(40);
+      value = value.trim();
+
+      // 1) Payment → open Google Pay automatically
+      const upi = parseUpi(value);
+      if (upi) {
+        const payee = upi.get("pn") || upi.get("pa");
+        const amount = upi.get("am");
+        const q = new URLSearchParams(upi);
+        if (!q.has("cu")) q.set("cu", "INR");
+        const target = "gpay://upi/pay?" + q.toString();
+        present({
+          kind: "Payment", title: payee,
+          body: (amount ? "Amount: ₹" + amount : "Amount: enter in Google Pay") + "\nUPI ID: " + upi.get("pa"),
+          note: "Opening Google Pay…", target, delay: 900
+        });
+        return;
+      }
+
+      // 2) Web link → open automatically (tap the card to cancel)
+      if (/^https?:\/\//i.test(value)) {
+        let host = value;
+        try { host = new URL(value).hostname; } catch (_) {}
+        present({ kind: "Link", title: host, body: value, note: "Opening link… tap to cancel", target: value, delay: 1500, cancellable: true });
+        return;
+      }
+
+      // 3) Phone / email / SMS
+      const scheme = (value.match(/^(tel|mailto|sms|smsto):/i) || [])[1];
+      if (scheme) {
+        const names = { tel: "Phone call", mailto: "Email", sms: "Message", smsto: "Message" };
+        const clean = value.replace(/^[a-z]+:/i, "").split("?")[0];
+        present({
+          kind: names[scheme.toLowerCase()], title: clean, body: value,
+          note: "Opening… tap to cancel",
+          target: scheme.toLowerCase() === "smsto" ? value.replace(/^smsto:/i, "sms:") : value,
+          delay: 1500, cancellable: true
+        });
+        return;
+      }
+
+      // 4) Content shown on screen
+      const wifi = parseWifi(value);
+      if (wifi) {
+        present({ kind: "Wi-Fi network", title: wifi.ssid || "Hidden network", body: (wifi.pass ? "Password: " + wifi.pass + "\n" : "") + "Security: " + wifi.type, note: "Tap to scan again" });
+        return;
+      }
+      const card = parseVcard(value);
+      if (card) {
+        present({ kind: "Contact", title: card.name || "Contact card", body: [card.tel && "Phone: " + card.tel, card.email && "Email: " + card.email].filter(Boolean).join("\n") || value, note: "Tap to scan again" });
+        return;
+      }
+      present({ kind: "Text", title: value.length > 60 ? "QR content" : value, body: value.length > 60 ? value : "", note: "Tap to scan again" });
+    }
+
+    function present({ kind, title, body, note, target, delay, cancellable }) {
+      $("kind").textContent = kind;
+      $("title").textContent = title;
+      $("content").textContent = body || "";
+      $("content").style.display = body ? "block" : "none";
+      $("note").textContent = note;
+      $("hint").textContent = "QR code found";
+      sheet.classList.add("show");
+
+      const bar = $("bar"), fb = $("fallback");
+      bar.classList.remove("run");
+      fb.hidden = true;
+      clearTimeout(timer);
+
+      if (target) {
+        bar.style.setProperty("--ms", delay + "ms");
+        void bar.offsetWidth;
+        bar.classList.add("run");
+        fb.href = target; fb.hidden = false;
+        fb.textContent = kind === "Payment" ? "Open Google Pay" : "Open now";
+        sheet.dataset.cancellable = cancellable ? "1" : "";
+        timer = setTimeout(() => { window.location.href = target; }, delay);
+      } else {
+        sheet.dataset.cancellable = "1";
+      }
+    }
+
+    function dismiss() {
+      clearTimeout(timer);
+      $("bar").classList.remove("run");
+      sheet.classList.remove("show");
+      document.body.classList.remove("found");
+      $("hint").textContent = "Point at a QR code";
+      setTimeout(() => { busy = false; }, 350);
+    }
+
+    /* Tap the card to cancel an auto-open / scan again (payments stay un-cancellable by accident) */
+    sheet.addEventListener("click", e => {
+      if (e.target.closest("#fallback")) return;
+      if (sheet.dataset.cancellable === "1") dismiss();
+    });
+    // Tapping anywhere retries the camera if it failed
+    document.body.addEventListener("click", () => { if (document.body.classList.contains("error")) startCamera(); });
+
+    /* Coming back from Google Pay / another app → reset and keep scanning */
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        if (sheet.classList.contains("show")) dismiss();
+        startCamera();
+      } else {
+        stopCamera();
+      }
+    });
+    window.addEventListener("pageshow", e => { if (e.persisted) { dismiss(); startCamera(); } });
+    window.addEventListener("pagehide", stopCamera);
+
+    startCamera();
+  </script>
+</body>
+</html>
