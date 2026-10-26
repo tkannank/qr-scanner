@@ -153,6 +153,23 @@
     let timer = null, lastTick = 0, starting = false;
 
     /* ---------- Camera ---------- */
+    // Labels are only readable after camera permission is granted
+    async function pickMainBackCamera() {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const backs = devices.filter(d => d.kind === "videoinput" && /back|rear|environment/i.test(d.label));
+      // Prefer the plain "Back Camera"; avoid Ultra Wide and Telephoto
+      const main = backs.find(d => !/ultra|wide|tele/i.test(d.label)) ||
+                   backs.find(d => /^back camera$/i.test(d.label));
+      return main ? main.deviceId : null;
+    }
+
+    function openStream(deviceId) {
+      const v = deviceId
+        ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        : { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+      return navigator.mediaDevices.getUserMedia({ audio: false, video: v });
+    }
+
     async function startCamera() {
       if (starting || stream) return;
       starting = true;
@@ -167,10 +184,28 @@
         starting = false; return;
       }
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }
-        });
+        // First open grants permission so device labels become readable
+        let s = await openStream(null);
+        const currentId = s.getVideoTracks()[0].getSettings().deviceId;
+        const mainId = await pickMainBackCamera();
+
+        // If we got a different lens (e.g. ultra-wide), switch to the main one
+        if (mainId && mainId !== currentId) {
+          s.getTracks().forEach(t => t.stop());
+          try { s = await openStream(mainId); }
+          catch (_) { s = await openStream(null); }
+        }
+        stream = s;
+
+        // Best-effort continuous autofocus (ignored if unsupported)
+        const track = stream.getVideoTracks()[0];
+        try {
+          const caps = track.getCapabilities ? track.getCapabilities() : {};
+          if (caps.focusMode && caps.focusMode.includes("continuous")) {
+            await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          }
+        } catch (_) {}
+
         video.srcObject = stream;
         await video.play();
         scanning = true;
@@ -199,22 +234,51 @@
       document.body.classList.add("error");
     }
 
-    /* ---------- Scan loop (downscaled + throttled for speed) ---------- */
-    function tick(now = 0) {
+    /* ---------- Scan loop ---------- */
+    const detector = ("BarcodeDetector" in window)
+      ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+    let pass = 0, detecting = false;
+
+    function decode(sx, sy, sw, sh, maxSide) {
+      sx = Math.round(sx); sy = Math.round(sy); sw = Math.round(sw); sh = Math.round(sh);
+      const scale = Math.min(1, maxSide / Math.max(sw, sh));
+      const w = Math.max(1, Math.round(sw * scale)), h = Math.max(1, Math.round(sh * scale));
+      canvas.width = w; canvas.height = h;
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+      const img = ctx.getImageData(0, 0, w, h);
+      return jsQR(img.data, w, h, { inversionAttempts: "attemptBoth" });
+    }
+
+    async function tick(now = 0) {
       if (!scanning) return;
       rafId = requestAnimationFrame(tick);
-      if (busy || now - lastTick < 90 || video.readyState < video.HAVE_ENOUGH_DATA) return;
+      if (busy || detecting || now - lastTick < 90 || video.readyState < video.HAVE_ENOUGH_DATA) return;
       lastTick = now;
 
       const vw = video.videoWidth, vh = video.videoHeight;
       if (!vw || !vh) return;
-      const scale = Math.min(1, 720 / Math.max(vw, vh));
-      const w = Math.round(vw * scale), h = Math.round(vh * scale);
-      canvas.width = w; canvas.height = h;
-      ctx.drawImage(video, 0, 0, w, h);
-      const img = ctx.getImageData(0, 0, w, h);
-      const code = jsQR(img.data, w, h, { inversionAttempts: "dontInvert" });
-      if (code && code.data) handle(code.data);
+
+      // 1) Native detector (if the browser has it)
+      if (detector) {
+        detecting = true;
+        try {
+          const r = await detector.detect(video);
+          if (r.length && r[0].rawValue && !busy) { detecting = false; handle(r[0].rawValue); return; }
+        } catch (_) {}
+        detecting = false;
+      }
+
+      // 2) jsQR, one scale per frame, cycling through several
+      const side = Math.min(vw, vh) * 0.7;
+      const cx = (vw - side) / 2, cy = (vh - side) / 2;
+      const attempts = [
+        () => decode(0, 0, vw, vh, 720),        // original behaviour (smooths moire)
+        () => decode(cx, cy, side, side, 480),  // centre, downscaled
+        () => decode(cx, cy, side, side, side), // centre, native (small codes)
+        () => decode(0, 0, vw, vh, 1280)        // full frame, high res
+      ];
+      const code = attempts[pass++ % attempts.length]();
+      if (code && code.data && !busy) handle(code.data);
     }
 
     /* ---------- Result handling ---------- */
