@@ -324,9 +324,14 @@
       if (upi) {
         const payee = upi.get("pn") || upi.get("pa");
         const amount = upi.get("am");
-        const q = new URLSearchParams(upi);
-        if (!q.has("cu")) q.set("cu", "INR");
-        const target = "gpay://upi/pay?" + q.toString();
+        // Pass the original QR string through untouched (merchant QRs carry signed/extra
+        // params like mc, sign, tr, orgid, mode). Rebuilding the URL can invalidate them.
+        let target;
+        if (/^upi:\/\/pay/i.test(value)) {
+          target = value.replace(/^upi:\/\/pay/i, "gpay://upi/pay");
+        } else {
+          target = "gpay://upi/pay?pa=" + encodeURIComponent(upi.get("pa")) + "&cu=INR";
+        }
         present({
           kind: "Payment", title: payee,
           body: (amount ? "Amount: ₹" + amount : "Amount: enter in Google Pay") + "\nUPI ID: " + upi.get("pa"),
