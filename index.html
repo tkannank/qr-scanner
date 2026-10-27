@@ -324,18 +324,16 @@
       if (upi) {
         const payee = upi.get("pn") || upi.get("pa");
         const amount = upi.get("am");
-        // Pass the original QR string through untouched (merchant QRs carry signed/extra
-        // params like mc, sign, tr, orgid, mode). Rebuilding the URL can invalidate them.
-        let target;
-        if (/^upi:\/\/pay/i.test(value)) {
-          target = value.replace(/^upi:\/\/pay/i, "gpay://upi/pay");
-        } else {
-          target = "gpay://upi/pay?pa=" + encodeURIComponent(upi.get("pa")) + "&cu=INR";
-        }
-        present({
-          kind: "Payment", title: payee,
-          body: (amount ? "Amount: ₹" + amount : "Amount: enter in Google Pay") + "\nUPI ID: " + upi.get("pa"),
-          note: "Opening Google Pay…", target, delay: 900
+        const upiId = upi.get("pa");
+        const body = (amount ? "Amount: ₹" + amount + "\n" : "") + "UPI ID: " + upiId;
+        // Only copy the UPI ID — nothing is opened. If iOS blocks the automatic copy,
+        // tapping the card copies it (a tap is allowed to use the clipboard).
+        copyText(upiId).then(ok => {
+          present({
+            kind: "Payment", title: payee, body,
+            note: ok ? "UPI ID copied · tap to scan again" : "Tap here to copy the UPI ID",
+            copy: ok ? "" : upiId
+          });
         });
         return;
       }
@@ -376,13 +374,28 @@
       present({ kind: "Text", title: value.length > 60 ? "QR content" : value, body: value.length > 60 ? value : "", note: "Tap to scan again" });
     }
 
-    function present({ kind, title, body, note, target, delay, cancellable }) {
+    async function copyText(t) {
+      try { await navigator.clipboard.writeText(t); return true; } catch (_) {}
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = t; ta.setAttribute("readonly", "");
+        ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;font-size:16px";
+        document.body.appendChild(ta);
+        ta.focus(); ta.select(); ta.setSelectionRange(0, t.length);
+        const ok = document.execCommand("copy");
+        ta.remove();
+        return ok;
+      } catch (_) { return false; }
+    }
+
+    function present({ kind, title, body, note, target, delay, cancellable, auto = true, copy = "" }) {
       $("kind").textContent = kind;
       $("title").textContent = title;
       $("content").textContent = body || "";
       $("content").style.display = body ? "block" : "none";
       $("note").textContent = note;
       $("hint").textContent = "QR code found";
+      sheet.dataset.copy = copy || "";
       sheet.classList.add("show");
 
       const bar = $("bar"), fb = $("fallback");
@@ -391,13 +404,16 @@
       clearTimeout(timer);
 
       if (target) {
-        bar.style.setProperty("--ms", delay + "ms");
-        void bar.offsetWidth;
-        bar.classList.add("run");
         fb.href = target; fb.hidden = false;
         fb.textContent = kind === "Payment" ? "Open Google Pay" : "Open now";
+        fb.dataset.copy = copy;
         sheet.dataset.cancellable = cancellable ? "1" : "";
-        timer = setTimeout(() => { window.location.href = target; }, delay);
+        if (auto) {
+          bar.style.setProperty("--ms", delay + "ms");
+          void bar.offsetWidth;
+          bar.classList.add("run");
+          timer = setTimeout(() => { window.location.href = target; }, delay);
+        }
       } else {
         sheet.dataset.cancellable = "1";
       }
@@ -415,7 +431,20 @@
     /* Tap the card to cancel an auto-open / scan again (payments stay un-cancellable by accident) */
     sheet.addEventListener("click", e => {
       if (e.target.closest("#fallback")) return;
+      const pending = sheet.dataset.copy;
+      if (pending) {
+        sheet.dataset.copy = "";
+        copyText(pending).then(ok => {
+          $("note").textContent = ok ? "UPI ID copied · tap to scan again" : "Couldn't copy · tap to scan again";
+        });
+        return;
+      }
       if (sheet.dataset.cancellable === "1") dismiss();
+    });
+    // Tapping "Open Google Pay" also copies the UPI ID (a tap is allowed to use the clipboard)
+    $("fallback").addEventListener("click", () => {
+      const t = $("fallback").dataset.copy;
+      if (t) copyText(t);
     });
     // Tapping anywhere retries the camera if it failed
     document.body.addEventListener("click", () => { if (document.body.classList.contains("error")) startCamera(); });
