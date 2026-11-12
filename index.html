@@ -107,6 +107,16 @@
     .bar.run i { animation: drain var(--ms, 1500ms) linear forwards; }
     @keyframes drain { to { transform: scaleX(0); } }
 
+    /* UPI app buttons (tap to open, nothing opens automatically) */
+    .apps { display: none; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+    .apps.show { display: flex; }
+    .apps a {
+      flex: 1 1 45%; text-align: center; padding: 12px 10px; border-radius: 14px;
+      background: #1b2330; border: 1px solid var(--line);
+      color: var(--accent); font-weight: 700; text-decoration: none; font-size: .95rem;
+    }
+    .amount { font-size: 2rem; font-weight: 800; color: var(--ink); margin: 2px 0 6px; }
+
     canvas { display: none; }
     @media (prefers-reduced-motion: reduce) {
       .line, .bar.run i { animation: none; }
@@ -136,6 +146,7 @@
     <div class="kind"><span class="dot"></span><span id="kind">Result</span></div>
     <h2 class="title" id="title"></h2>
     <p class="body" id="content"></p>
+    <div class="apps" id="apps"></div>
     <div class="bar" id="bar"><i></i></div>
     <div class="foot"><span id="note"></span><a id="fallback" href="#" hidden>Open</a></div>
   </section>
@@ -319,21 +330,43 @@
       if (navigator.vibrate) navigator.vibrate(40);
       value = value.trim();
 
-      // 1) Payment → open Google Pay automatically
+      // 1) Payment: show app buttons, nothing opens automatically
       const upi = parseUpi(value);
       if (upi) {
         const payee = upi.get("pn") || upi.get("pa");
         const amount = upi.get("am");
         const upiId = upi.get("pa");
-        const body = (amount ? "Amount: ₹" + amount + "\n" : "") + "UPI ID: " + upiId;
-        // Only copy the UPI ID — nothing is opened. If iOS blocks the automatic copy,
-        // tapping the card copies it (a tap is allowed to use the clipboard).
+
+        // Keep the ORIGINAL query string untouched (signed params must not be re-encoded)
+        const q = /^upi:/i.test(value)
+          ? value.slice(value.indexOf("?") + 1)
+          : "pa=" + encodeURIComponent(upiId) + "&cu=INR";
+
+        const apps = [
+          ["Google Pay", "gpay://upi/pay?" + q],
+          ["PhonePe",    "phonepe://pay?" + q],
+          ["Paytm",      "paytmmp://pay?" + q],
+          ["Other UPI",  "upi://pay?" + q]
+        ];
+        const box = $("apps");
+        box.textContent = "";
+        apps.forEach(([name, url]) => {
+          const a = document.createElement("a");
+          a.href = url;
+          a.textContent = name;
+          box.appendChild(a);
+        });
+
         copyText(upiId).then(ok => {
           present({
-            kind: "Payment", title: payee, body,
-            note: ok ? "UPI ID copied · tap to scan again" : "Tap here to copy the UPI ID",
+            kind: "Payment",
+            title: payee,
+            body: (amount ? "Amount: ₹" + amount + "\n" : "") + "UPI ID: " + upiId,
+            note: ok ? "UPI ID copied · tap an app to pay" : "Tap here to copy the UPI ID",
             copy: ok ? "" : upiId
           });
+          box.classList.add("show");
+          sheet.dataset.cancellable = "1";
         });
         return;
       }
@@ -395,6 +428,7 @@
       $("content").style.display = body ? "block" : "none";
       $("note").textContent = note;
       $("hint").textContent = "QR code found";
+      $("apps").classList.remove("show");
       sheet.dataset.copy = copy || "";
       sheet.classList.add("show");
 
@@ -405,7 +439,7 @@
 
       if (target) {
         fb.href = target; fb.hidden = false;
-        fb.textContent = kind === "Payment" ? "Open Google Pay" : "Open now";
+        fb.textContent = "Open now";
         fb.dataset.copy = copy;
         sheet.dataset.cancellable = cancellable ? "1" : "";
         if (auto) {
@@ -422,15 +456,16 @@
     function dismiss() {
       clearTimeout(timer);
       $("bar").classList.remove("run");
+      $("apps").classList.remove("show");
       sheet.classList.remove("show");
       document.body.classList.remove("found");
       $("hint").textContent = "Point at a QR code";
       setTimeout(() => { busy = false; }, 350);
     }
 
-    /* Tap the card to cancel an auto-open / scan again (payments stay un-cancellable by accident) */
+    /* Tap the card to cancel an auto-open / scan again */
     sheet.addEventListener("click", e => {
-      if (e.target.closest("#fallback")) return;
+      if (e.target.closest("#fallback") || e.target.closest("#apps")) return;
       const pending = sheet.dataset.copy;
       if (pending) {
         sheet.dataset.copy = "";
@@ -441,7 +476,7 @@
       }
       if (sheet.dataset.cancellable === "1") dismiss();
     });
-    // Tapping "Open Google Pay" also copies the UPI ID (a tap is allowed to use the clipboard)
+    // Tapping "Open now" also copies when a copy value is pending
     $("fallback").addEventListener("click", () => {
       const t = $("fallback").dataset.copy;
       if (t) copyText(t);
